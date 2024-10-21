@@ -1,0 +1,202 @@
+# Provider configuration
+provider "google" {
+  project = var.gcp_project_id
+  region  = var.gcp_region
+}
+
+provider "kubernetes" {
+  host                   = google_container_cluster.gke_cluster.endpoint
+  cluster_ca_certificate = base64decode(google_container_cluster.gke_cluster.master_auth.0.cluster_ca_certificate)
+  token                  = data.google_client_config.default.access_token
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "gcloud"
+    args        = ["config", "config-helper", "--format=json"]
+  }
+}
+
+data "google_client_config" "default" {}
+
+# VPC Network and Subnetwork Setup
+
+# Create a VPC network
+resource "google_compute_network" "gke_vpc_network" {
+  name                   = "gke-vpc-network"
+  auto_create_subnetworks = false
+  description             = "Custom VPC network for GKE"
+}
+
+
+# Create a subnetwork within the VPC
+resource "google_compute_subnetwork" "gke_subnetwork" {
+  name          = "gke-subnetwork"
+  ip_cidr_range = "10.0.0.0/16"  # Primary IP range for nodes
+  region        = var.gcp_region
+  network       = google_compute_network.gke_vpc_network.id
+
+  # Enable private Google access for GKE nodes
+  private_ip_google_access = true
+
+  # Add secondary IP ranges for pods and services
+  secondary_ip_range {
+    range_name    = "gke-pods"
+    ip_cidr_range = "10.1.0.0/16"  # Adjust as needed
+  }
+
+  secondary_ip_range {
+    range_name    = "gke-services"
+    ip_cidr_range = "10.2.0.0/32"  # Adjust as needed
+  }
+}
+
+
+# Firewall Rules
+
+# Allow incoming traffic to nodes from the internet (external traffic)
+resource "google_compute_firewall" "allow_external_traffic" {
+  name    = "allow-external-traffic"
+  network = google_compute_network.gke_vpc_network.id
+
+  # Source IP ranges (this allows all incoming traffic)
+  source_ranges = ["0.0.0.0/0"]
+
+  # Allow the following protocols and ports (adjust as needed)
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443", "22", "8000", "11434"]  # Allow HTTP, HTTPS, SSH and Agent applications
+  }
+}
+
+# Allow internal communication between nodes
+resource "google_compute_firewall" "allow_internal_traffic" {
+  name    = "allow-internal-traffic"
+  network = google_compute_network.gke_vpc_network.id
+
+  # Source and destination IP ranges
+  source_ranges      = ["10.0.0.0/16"]  # The range of the subnetwork
+  destination_ranges = ["10.0.0.0/16"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["0-65535"]  # Allow all TCP ports internally
+  }
+
+  allow {
+    protocol = "udp"
+    ports    = ["0-65535"]  # Allow all UDP ports internally
+  }
+
+  allow {
+    protocol = "icmp"
+  }
+}
+
+# External IP allocation for nodes
+
+# Allocate external IP address for the nodes
+resource "google_compute_address" "external_ip" {
+  name         = "node-external-ip"
+  address_type = "EXTERNAL"
+}
+
+# GKE Cluster and Node Pool Configuration
+
+# Define the GKE cluster
+resource "google_container_cluster" "gke_cluster" {
+  name               = "${var.gcp_project_id}-cluster"
+  location           = "us-west1-a"
+  initial_node_count = 1
+
+  deletion_protection = false
+
+  network    = google_compute_network.gke_vpc_network.id
+  subnetwork = google_compute_subnetwork.gke_subnetwork.name
+
+  # Enable IP aliasing and specify secondary ranges
+  ip_allocation_policy {
+    use_ip_aliases                = true
+    cluster_secondary_range_name  = "gke-pods"
+    services_secondary_range_name = "gke-services"
+  }
+
+  # Enable autoscaling
+  remove_default_node_pool = true
+}
+
+# Define the GKE node pool 
+resource "google_container_node_pool" "gke_node_pool" {
+  name               = "${var.gcp_project_id}-node-pool"
+  cluster            = google_container_cluster.gke_cluster.name
+  location           = google_container_cluster.gke_cluster.location
+  initial_node_count = 1
+
+  node_config {
+    machine_type = "n1-highmem-8"
+    disk_size_gb = 100  # Adjust as needed
+
+    guest_accelerator {
+      type  = "nvidia-tesla-p100"
+      count = 1
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]
+
+    metadata = {
+      "disable-legacy-endpoint" = "true"
+    }
+
+    # Enable GPU driver installation
+    workload_metadata_config {
+      mode = "GCE_METADATA"
+    }
+  }
+
+
+  # Optional autoscaling configuration
+  autoscaling {
+    min_node_count = 1
+    max_node_count = 3
+  }
+
+  management {
+    auto_upgrade = true
+    auto_repair  = true
+  }
+}
+
+# Apply the Kubernetes manifest using a null_resource
+resource "null_resource" "apply_kubernetes_manifest" {
+  depends_on = [
+    google_container_cluster.gke_cluster,
+    google_container_node_pool.gke_node_pool,
+  ]
+
+  # NOTE:
+  # Get this file from the "dev" directory.  Copy this file link and to this directory and rename it to "mor-chat-dply.yaml":
+  #  https://github.com/FLock-io/ragchat-morpheus/blob/main/k8s/deployment.yaml
+
+
+  provisioner "local-exec" {
+    command     = "kubectl apply -f mor-chat-dply.yaml"
+    environment = {
+      KUBECONFIG = "${path.module}/kubeconfig"
+    }
+  }
+}
+
+# Generate kubeconfig file
+resource "local_file" "kubeconfig" {
+  content  = templatefile("${path.module}/kubeconfig.tmpl", {
+    cluster_ca_certificate = google_container_cluster.gke_cluster.master_auth[0].cluster_ca_certificate
+    endpoint               = google_container_cluster.gke_cluster.endpoint
+
+    cluster_name           = google_container_cluster.gke_cluster.name
+    cluster_zone           = google_container_cluster.gke_cluster.location
+    project_id             = var.gcp_project_id
+    token                  = data.google_client_config.default.access_token
+  })
+  filename = "${path.module}/kubeconfig"
+}
