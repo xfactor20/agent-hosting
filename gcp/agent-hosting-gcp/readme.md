@@ -191,9 +191,14 @@ https://github.com/xfactor20/compute-services/master/gcp/agent-gke-gcp-1/referen
 
 ## Usage Instructions
 
-1. **Set Variables**: Create a `terraform.tfvars` file or set environment variables with your GCP project ID and region and Vault server (access keys storage). Run the below command for the file located in the scripts directory: 
+1.  **Clone Repository**: Clone this repository to your local workspace, GCP Cloud Shell or command line path:
+    ```hcl
+    git clone https://github.com/morpheus-software/agent-hosting.git  
+    ```
+    
+2.  **Set Variables**: Create a `terraform.tfvars` file or set environment variables with your GCP project ID and region and Vault server (access keys storage). At the root of the cloned repository noted in step #1. Open a command line (GCP Cloud Shell or similar) and run the `scripts` directory: 
    ```bash
-   ./scripts/setup_tfvars_vault.sh
+   <path-to-cloned-reposiory>/./scripts/setup_tfvars_vault.sh
    ```
    
    Conversely, make certain these environment variables are set prior to proceeding
