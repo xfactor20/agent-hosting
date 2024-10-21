@@ -1,2 +1,2 @@
-# agent-hosting
-agent-hosting for various services and applications
+# NFA Smart Agent Hosting
+Smart Agent hosting for the Morpheus ecosystem. 
